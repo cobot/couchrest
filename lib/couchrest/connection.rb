@@ -109,12 +109,22 @@ module CouchRest
 
     # Take a look at the options povided and try to apply them to the HTTP conneciton.
     def prepare_http_connection
-      conn = HTTPX.plugin(:persistent).plugin(:compression)
-      if (proxy_uri = options[:proxy] || self.class.proxy)
-        conn = conn.plugin(:proxy).with_proxy(uri: proxy_uri)
+      Thread.current[:couchrest_http_connections] ||= {}
+      cache_key = [
+        options[:proxy], 
+        ssl_options(options), 
+        uri.user, uri.password, 
+        timeout_options(options)
+      ]
+      
+      unless (conn = Thread.current[:couchrest_http_connections][cache_key])
+        conn = HTTPX.plugin(:persistent).plugin(:compression)
+        if (proxy_uri = options[:proxy] || self.class.proxy)
+          conn = conn.plugin(:proxy).with_proxy(uri: proxy_uri)
+        end
+      
+        Thread.current[:couchrest_http_connections][cache_key] = conn = set_http_connection_options(conn, options)
       end
-
-      conn = set_http_connection_options(conn, options)
       conn
     end
 
@@ -127,26 +137,32 @@ module CouchRest
       end
 
       # SSL Certificate option mapping
-      @ssl_options = {}
-      if opts.include?(:verify_ssl)
-        @ssl_options[:verify_mode] = opts[:verify_ssl] ? OpenSSL::SSL::VERIFY_PEER : OpenSSL::SSL::VERIFY_NONE
-      end
-      @ssl_options[:client_cert] = opts[:ssl_client_cert] if opts.include?(:ssl_client_cert)
-      @ssl_options[:client_key]  = opts[:ssl_client_key]  if opts.include?(:ssl_client_key)
-      @ssl_options[:ca_path] = (opts[:ssl_ca_file]) if opts.include?(:ssl_ca_file)
-
+      @ssl_options = ssl_options(opts)
+      
       # Timeout options
-
-      conn = conn.with(
-        timeout: { 
-          operation_timeout: opts[:timeout],
-          connect_timeout: opts[:open_timeout]
-        }.compact
-      )
+      conn = conn.with(timeout: timeout_options(opts))
 
       conn
       # conn.receive_timeout = opts[:timeout] 
       # conn.send_timeout    = opts[:read_timeout] if opts.include?(:read_timeout)
+    end
+
+    def timeout_options(opts)
+      {
+        operation_timeout: opts[:timeout],
+        connect_timeout: opts[:open_timeout]
+      }.compact
+    end
+
+    def ssl_options(opts)
+      ssl_options = {}
+      if opts.include?(:verify_ssl)
+        ssl_options[:verify_mode] = opts[:verify_ssl] ? OpenSSL::SSL::VERIFY_PEER : OpenSSL::SSL::VERIFY_NONE
+      end
+      ssl_options[:client_cert] = opts[:ssl_client_cert] if opts.include?(:ssl_client_cert)
+      ssl_options[:client_key]  = opts[:ssl_client_key]  if opts.include?(:ssl_client_key)
+      ssl_options[:ca_path] = (opts[:ssl_ca_file]) if opts.include?(:ssl_ca_file)
+      ssl_options
     end
 
     def execute(method, path, options, payload = nil, &block)

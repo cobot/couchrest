@@ -2,6 +2,10 @@ require File.expand_path("../../spec_helper", __FILE__)
 
 describe CouchRest::Connection do
 
+  before(:each) do
+    Thread.current[:couchrest_http_connections] = nil
+  end
+
   let(:simple_response) { "{\"ok\":true}" }
   let(:parser) { MultiJson }
   let(:parser_opts) { {:max_nesting => false} }
@@ -181,7 +185,43 @@ describe CouchRest::Connection do
         expect(timeout[:connect_timeout]).to eql(26)
         # expect(conn.http.send_timeout).to eql(27)
       end
+    end
 
+    context 'when caching the http client' do
+      it 'should only create one httpx object' do
+        expect(HTTPX).to receive(:plugin).once.and_call_original
+
+        2.times { CouchRest::Connection.new(URI("https://localhost:5984")) }
+      end
+
+      it 'should create multiple clients when passing different proxy options' do
+        expect(HTTPX).to receive(:plugin).twice.and_call_original
+
+        CouchRest::Connection.new(URI("https://localhost:5984"))
+        CouchRest::Connection.new(URI("https://localhost:5984"), :proxy => 'http://proxy2')
+      end
+
+      it 'should create multiple clients when passing different ssl options' do
+        expect(HTTPX).to receive(:plugin).twice.and_call_original
+
+        CouchRest::Connection.new(URI("https://localhost:5984"))
+        CouchRest::Connection.new(URI("https://localhost:5984"), :verify_ssl => true)
+      end
+
+      it 'should create multiple clients when passing different authentication options' do
+        expect(HTTPX).to receive(:plugin).exactly(3).times.and_call_original
+
+        CouchRest::Connection.new(URI("https://localhost:5984"))
+        CouchRest::Connection.new(URI("https://user:pass@localhost:5984"))
+        CouchRest::Connection.new(URI("https://user:pass2@localhost:5984"))
+      end
+
+      it 'should create multiple clients when passing different timeout options' do
+        expect(HTTPX).to receive(:plugin).twice.and_call_original
+
+        CouchRest::Connection.new(URI("https://localhost:5984"))
+        CouchRest::Connection.new(URI("https://localhost:5984"), :timeout => 23)
+      end
     end
   end
 
