@@ -43,24 +43,38 @@ describe CouchRest::Connection do
       expect(conn.http.build_request(:get, 'http://').headers['authorization']).to be_nil
     end
 
-    xit "should use the proxy if defined in parameters" do
-      conn = CouchRest::Connection.new(URI("http://localhost:5984"), :proxy => 'http://proxy')
-      expect(conn.http.proxy.to_s).to eql('http://proxy')
-    end
+    context 'with proxy' do
+      let(:proxy_plugin) { double('HTTPX').as_null_object }
 
-    xit "should use the proxy if defined in class" do
-      CouchRest::Connection.proxy = 'http://proxy'
-      conn = CouchRest::Connection.new(URI "http://localhost:5984")
-      expect(conn.http.proxy.to_s).to eql('http://proxy')
-      CouchRest::Connection.proxy = nil
+      before(:each) do 
+        allow(HTTPX).to receive(:plugin) { HTTPX }
+        allow(HTTPX).to receive(:plugin).with(:proxy) { proxy_plugin }
+      end
 
-    end
+      after(:each) do
+        CouchRest::Connection.proxy = nil
+      end
 
-    xit "should allow default proxy to be overwritten" do
-      CouchRest::Connection.proxy = 'http://proxy'
-      conn = CouchRest::Connection.new(URI("http://localhost:5984"), :proxy => 'http://proxy2')
-      expect(conn.http.proxy.to_s).to eql('http://proxy2')
-      CouchRest::Connection.proxy = nil
+      it "should use the proxy if defined in parameters" do
+        expect(proxy_plugin).to receive(:with_proxy).with(uri: "http://proxy") { proxy_plugin }
+
+        conn = CouchRest::Connection.new(URI("http://localhost:5984"), :proxy => 'http://proxy')
+      end
+
+      it "should use the proxy if defined in class" do
+        expect(proxy_plugin).to receive(:with_proxy).with(uri: "http://proxy") { proxy_plugin }
+
+        CouchRest::Connection.proxy = 'http://proxy'
+        conn = CouchRest::Connection.new(URI "http://localhost:5984")
+      end
+
+      it "should allow default proxy to be overwritten" do
+        CouchRest::Connection.proxy = 'http://proxy'
+
+        expect(proxy_plugin).to receive(:with_proxy).with(uri: "http://proxy2") { proxy_plugin }
+
+        conn = CouchRest::Connection.new(URI("http://localhost:5984"), :proxy => 'http://proxy2')
+      end
     end
 
     it "should pass through authentication details" do
@@ -70,33 +84,48 @@ describe CouchRest::Connection do
     end
 
     describe "with SSL options" do
+      let(:httpx) { double(:httpx) }
+      let(:response) { double(:response, status: 200, body: '{}') }
 
-      xit "should leave the default if nothing set" do
-        default = HTTPClient.new.ssl_config.verify_mode
-        conn = CouchRest::Connection.new(URI "https://localhost:5984")
-        expect(conn.http.ssl_config.verify_mode).to eql(default)
+      before(:each) do 
+        stub_const('HTTPX', httpx)
+        allow(httpx).to receive(:plugin) { httpx }
+        allow(httpx).to receive(:with) { httpx }
+        allow(httpx).to receive(:request) { response }
       end
 
-      xit "should support disabling SSL verify mode" do
-        conn = CouchRest::Connection.new(URI("https://localhost:5984"), :verify_ssl => false)
-        expect(conn.http.ssl_config.verify_mode).to eql(OpenSSL::SSL::VERIFY_NONE)
+      it "should leave the default if nothing set" do
+        expect(HTTPX).to receive(:request)
+          .with(anything, anything, hash_including(ssl: {}))
+        
+        CouchRest::Connection.new(URI "https://localhost:5984").get('/')
       end
 
-      xit "should support enabling SSL verify mode" do
-        conn = CouchRest::Connection.new(URI("https://localhost:5984"), :verify_ssl => true)
-        expect(conn.http.ssl_config.verify_mode).to eql(OpenSSL::SSL::VERIFY_PEER)
+      it "should support disabling SSL verify mode" do
+        expect(HTTPX).to receive(:request)
+          .with(anything, anything, hash_including(ssl: {verify_mode: OpenSSL::SSL::VERIFY_NONE}))
+
+        CouchRest::Connection.new(URI("https://localhost:5984"), :verify_ssl => false).get('/')
       end
 
-      xit "should support setting specific client cert & key" do
-        conn = CouchRest::Connection.new(URI("https://localhost:5984"),
+      it "should support enabling SSL verify mode" do
+        expect(HTTPX).to receive(:request)
+          .with(anything, anything, hash_including(ssl: {verify_mode: OpenSSL::SSL::VERIFY_PEER}))
+
+        CouchRest::Connection.new(URI("https://localhost:5984"), :verify_ssl => true).get('/')
+      end
+
+      it "should support setting specific client cert & key" do
+        expect(HTTPX).to receive(:request)
+          .with(anything, anything, hash_including(ssl: {client_cert: 'cert', client_key: 'key'}))
+
+        CouchRest::Connection.new(URI("https://localhost:5984"),
           :ssl_client_cert => 'cert',
           :ssl_client_key  => 'key',
-        )
-        expect(conn.http.ssl_config.client_cert).to eql('cert')
-        expect(conn.http.ssl_config.client_key).to eql('key')
+      ).get('/')
       end
 
-      xit "should support adding the ca to trust from a file" do
+      it "should support adding the ca to trust from a file" do
         file = Tempfile.new(['server', '.pem'])
         File.write(file.path, "-----BEGIN CERTIFICATE-----
           MIIDrTCCAxagAwIBAgIBADANBgkqhkiG9w0BAQQFADCBnDEbMBkGA1UEChMSVGhl
@@ -120,17 +149,23 @@ describe CouchRest::Connection do
           FS5G13pW2ZnAlSdTkSTKkE5wGZ1RYSfyiEKXb+uOKhDN9LnajDzaMPkNDU2NDXDz
           SqHk9ZiE1boQaMzjNLu+KabTLpmL9uXvFA/i+gdenFHv
           -----END CERTIFICATE-----".gsub(/^\s+/, ''))
-        conn = CouchRest::Connection.new(URI("https://localhost:5984"),
+
+        expect(HTTPX).to receive(:request)
+          .with(anything, anything, hash_including(ssl: {ca_path: file.path}))
+
+
+        CouchRest::Connection.new(URI("https://localhost:5984"),
           :ssl_ca_file => file.path
-        )
-        conn.http.ssl_config.cert_store_items.should include(file.path)
+        ).get('/')
       end
 
-      xit "should support adding multiple ca certificates from a directory" do
-        conn = CouchRest::Connection.new(URI("https://localhost:5984"),
+      it "should support adding multiple ca certificates from a directory" do
+        expect(HTTPX).to receive(:request)
+          .with(anything, anything, hash_including(ssl: {ca_path: '.'}))
+
+        CouchRest::Connection.new(URI("https://localhost:5984"),
           :ssl_ca_file => '.'
-        )
-        conn.http.ssl_config.cert_store_items.should include('.')
+      ).get('/')
       end
     end
 

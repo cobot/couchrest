@@ -188,7 +188,6 @@ module CouchRest
 
     # Send request, and leave a reference to the response for debugging purposes
     def send_request(req, &block)
-      # require 'byebug'; byebug
       @last_response = @http.request(
         req[:method].downcase, 
         req[:uri], 
