@@ -2,6 +2,10 @@ require File.expand_path("../../spec_helper", __FILE__)
 
 describe CouchRest::Connection do
 
+  before(:each) do
+    Thread.current[:couchrest_http_connections] = nil
+  end
+
   let(:simple_response) { "{\"ok\":true}" }
   let(:parser) { MultiJson }
   let(:parser_opts) { {:max_nesting => false} }
@@ -17,6 +21,9 @@ describe CouchRest::Connection do
   end
 
   describe "initialization" do
+    after(:each) do
+      CouchRest::Connection.proxy = nil
+    end
 
     it "should not modify the provided URI" do
       uri = URI("http://localhost:5984/path/random?query=none#fragment")
@@ -36,60 +43,90 @@ describe CouchRest::Connection do
 
     it "should have instantiated an HTTP connection" do
       conn = CouchRest::Connection.new(URI "http://localhost:5984")
-      expect(conn.http).to be_a(HTTPClient)
-      expect(conn.http.www_auth.basic_auth.set?).to be_false
+      expect(conn.http).to be_a(HTTPX::Session )
+      expect(conn.http.build_request(:get, 'http://').headers['authorization']).to be_nil
     end
 
-    it "should use the proxy if defined in parameters" do
-      conn = CouchRest::Connection.new(URI("http://localhost:5984"), :proxy => 'http://proxy')
-      expect(conn.http.proxy.to_s).to eql('http://proxy')
-    end
+    context 'with proxy' do
+      let(:proxy_plugin) { double('HTTPX').as_null_object }
 
-    it "should use the proxy if defined in class" do
-      CouchRest::Connection.proxy = 'http://proxy'
-      conn = CouchRest::Connection.new(URI "http://localhost:5984")
-      expect(conn.http.proxy.to_s).to eql('http://proxy')
-      CouchRest::Connection.proxy = nil
+      before(:each) do 
+        allow(HTTPX).to receive(:plugin) { HTTPX }
+        allow(HTTPX).to receive(:plugin).with(:proxy) { proxy_plugin }
+      end
 
-    end
+      after(:each) do
+        CouchRest::Connection.proxy = nil
+      end
 
-    it "should allow default proxy to be overwritten" do
-      CouchRest::Connection.proxy = 'http://proxy'
-      conn = CouchRest::Connection.new(URI("http://localhost:5984"), :proxy => 'http://proxy2')
-      expect(conn.http.proxy.to_s).to eql('http://proxy2')
-      CouchRest::Connection.proxy = nil
+      it "should use the proxy if defined in parameters" do
+        expect(proxy_plugin).to receive(:with_proxy).with(uri: "http://proxy") { proxy_plugin }
+
+        conn = CouchRest::Connection.new(URI("http://localhost:5984"), :proxy => 'http://proxy')
+      end
+
+      it "should use the proxy if defined in class" do
+        expect(proxy_plugin).to receive(:with_proxy).with(uri: "http://proxy") { proxy_plugin }
+
+        CouchRest::Connection.proxy = 'http://proxy'
+        conn = CouchRest::Connection.new(URI "http://localhost:5984")
+      end
+
+      it "should allow default proxy to be overwritten" do
+        CouchRest::Connection.proxy = 'http://proxy'
+
+        expect(proxy_plugin).to receive(:with_proxy).with(uri: "http://proxy2") { proxy_plugin }
+
+        conn = CouchRest::Connection.new(URI("http://localhost:5984"), :proxy => 'http://proxy2')
+      end
     end
 
     it "should pass through authentication details" do
       conn = CouchRest::Connection.new(URI "http://user:pass@mock")
-      expect(conn.http.www_auth.basic_auth.set?).to be_true
+
+      expect(conn.http.build_request(:get, 'http://').headers['authorization']).to include('Basic')
     end
 
     describe "with SSL options" do
+      let(:httpx) { double(:httpx) }
+      let(:response) { double(:response, status: 200, body: '{}') }
+
+      before(:each) do 
+        stub_const('HTTPX', httpx)
+        allow(httpx).to receive(:plugin) { httpx }
+        allow(httpx).to receive(:with) { httpx }
+        allow(httpx).to receive(:request) { response }
+      end
 
       it "should leave the default if nothing set" do
-        default = HTTPClient.new.ssl_config.verify_mode
-        conn = CouchRest::Connection.new(URI "https://localhost:5984")
-        expect(conn.http.ssl_config.verify_mode).to eql(default)
+        expect(HTTPX).to receive(:request)
+          .with(anything, anything, hash_including(ssl: {}))
+        
+        CouchRest::Connection.new(URI "https://localhost:5984").get('/')
       end
 
       it "should support disabling SSL verify mode" do
-        conn = CouchRest::Connection.new(URI("https://localhost:5984"), :verify_ssl => false)
-        expect(conn.http.ssl_config.verify_mode).to eql(OpenSSL::SSL::VERIFY_NONE)
+        expect(HTTPX).to receive(:request)
+          .with(anything, anything, hash_including(ssl: {verify_mode: OpenSSL::SSL::VERIFY_NONE}))
+
+        CouchRest::Connection.new(URI("https://localhost:5984"), :verify_ssl => false).get('/')
       end
 
       it "should support enabling SSL verify mode" do
-        conn = CouchRest::Connection.new(URI("https://localhost:5984"), :verify_ssl => true)
-        expect(conn.http.ssl_config.verify_mode).to eql(OpenSSL::SSL::VERIFY_PEER)
+        expect(HTTPX).to receive(:request)
+          .with(anything, anything, hash_including(ssl: {verify_mode: OpenSSL::SSL::VERIFY_PEER}))
+
+        CouchRest::Connection.new(URI("https://localhost:5984"), :verify_ssl => true).get('/')
       end
 
       it "should support setting specific client cert & key" do
-        conn = CouchRest::Connection.new(URI("https://localhost:5984"),
+        expect(HTTPX).to receive(:request)
+          .with(anything, anything, hash_including(ssl: {client_cert: 'cert', client_key: 'key'}))
+
+        CouchRest::Connection.new(URI("https://localhost:5984"),
           :ssl_client_cert => 'cert',
           :ssl_client_key  => 'key',
-        )
-        expect(conn.http.ssl_config.client_cert).to eql('cert')
-        expect(conn.http.ssl_config.client_key).to eql('key')
+      ).get('/')
       end
 
       it "should support adding the ca to trust from a file" do
@@ -116,17 +153,23 @@ describe CouchRest::Connection do
           FS5G13pW2ZnAlSdTkSTKkE5wGZ1RYSfyiEKXb+uOKhDN9LnajDzaMPkNDU2NDXDz
           SqHk9ZiE1boQaMzjNLu+KabTLpmL9uXvFA/i+gdenFHv
           -----END CERTIFICATE-----".gsub(/^\s+/, ''))
-        conn = CouchRest::Connection.new(URI("https://localhost:5984"),
+
+        expect(HTTPX).to receive(:request)
+          .with(anything, anything, hash_including(ssl: {ca_path: file.path}))
+
+
+        CouchRest::Connection.new(URI("https://localhost:5984"),
           :ssl_ca_file => file.path
-        )
-        conn.http.ssl_config.cert_store_items.should include(file.path)
+        ).get('/')
       end
 
       it "should support adding multiple ca certificates from a directory" do
-        conn = CouchRest::Connection.new(URI("https://localhost:5984"),
+        expect(HTTPX).to receive(:request)
+          .with(anything, anything, hash_including(ssl: {ca_path: '.'}))
+
+        CouchRest::Connection.new(URI("https://localhost:5984"),
           :ssl_ca_file => '.'
-        )
-        conn.http.ssl_config.cert_store_items.should include('.')
+      ).get('/')
       end
     end
 
@@ -137,12 +180,48 @@ describe CouchRest::Connection do
                                          :open_timeout => 26,
                                          :read_timeout => 27
                                         )
+        timeout = conn.http.instance_variable_get('@options').timeout
+        expect(timeout[:operation_timeout]).to eql(23)
+        expect(timeout[:connect_timeout]).to eql(26)
+        # expect(conn.http.send_timeout).to eql(27)
+      end
+    end
 
-        expect(conn.http.receive_timeout).to eql(23)
-        expect(conn.http.connect_timeout).to eql(26)
-        expect(conn.http.send_timeout).to eql(27)
+    context 'when caching the http client' do
+      it 'should only create one httpx object' do
+        expect(HTTPX).to receive(:plugin).once.and_call_original
+
+        2.times { CouchRest::Connection.new(URI("https://localhost:5984")) }
       end
 
+      it 'should create multiple clients when passing different proxy options' do
+        expect(HTTPX).to receive(:plugin).twice.and_call_original
+
+        CouchRest::Connection.new(URI("https://localhost:5984"))
+        CouchRest::Connection.new(URI("https://localhost:5984"), :proxy => 'http://proxy2')
+      end
+
+      it 'should create multiple clients when passing different ssl options' do
+        expect(HTTPX).to receive(:plugin).twice.and_call_original
+
+        CouchRest::Connection.new(URI("https://localhost:5984"))
+        CouchRest::Connection.new(URI("https://localhost:5984"), :verify_ssl => true)
+      end
+
+      it 'should create multiple clients when passing different authentication options' do
+        expect(HTTPX).to receive(:plugin).exactly(3).times.and_call_original
+
+        CouchRest::Connection.new(URI("https://localhost:5984"))
+        CouchRest::Connection.new(URI("https://user:pass@localhost:5984"))
+        CouchRest::Connection.new(URI("https://user:pass2@localhost:5984"))
+      end
+
+      it 'should create multiple clients when passing different timeout options' do
+        expect(HTTPX).to receive(:plugin).twice.and_call_original
+
+        CouchRest::Connection.new(URI("https://localhost:5984"))
+        CouchRest::Connection.new(URI("https://localhost:5984"), :timeout => 23)
+      end
     end
   end
 
@@ -249,7 +328,7 @@ describe CouchRest::Connection do
         stub_request(:get, "http://user:pass@mock/db/test")
           .to_return(:body => doc.to_json)
         conn = CouchRest::Connection.new(URI "http://user:pass@mock")
-        expect(conn.http.www_auth.basic_auth.force_auth).to be_true
+        expect(conn.http.build_request(:get, 'http://').headers['authorization']).to include('Basic')
         conn.get("db/test")
       end
 
