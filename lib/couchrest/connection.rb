@@ -207,7 +207,7 @@ module CouchRest
       @last_response = @http.request(
         req[:method].downcase, 
         req[:uri], 
-        {
+        **{
           ssl: @ssl_options, 
           body: req[:body],
           headers: req[:header]
